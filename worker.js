@@ -5,7 +5,8 @@ const ttl = p =>
   p.startsWith("/fixtures") && p.includes("live=") ? 20 :
   p.startsWith("/standings") ? 300 :
   p.startsWith("/fixtures") ? 60 :
-  p.startsWith("/players") || p.startsWith("/coachs") ? 3600 : 120;
+  p.startsWith("/coachs") ? 86400 :
+  p.startsWith("/players") ? 3600 : 120;
 
 export default {
   async fetch(req, env, ctx) {
