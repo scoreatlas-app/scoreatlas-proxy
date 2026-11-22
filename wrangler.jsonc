@@ -8,5 +8,6 @@
   "durable_objects": {
     "bindings": [{ "name": "CHAT", "class_name": "Chat" }]
   },
+  "triggers": { "crons": ["*/20 * * * *"] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Chat"] }]
 }

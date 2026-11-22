@@ -8,7 +8,30 @@ const ttl = p =>
   p.startsWith("/coachs") ? 86400 :
   p.startsWith("/players") ? 3600 : 180;
 
+// ---- Vooraf ophalen (cron): populaire competities en clubs staan klaar in de cache ----
+const WL = [39,140,135,78,61,88,144,94,203,71,128,2,3,848,40,179,207,218,113,103,119,253,307,262];
+const WT = [645,611,549,998,40,50,33,42,49,47,541,529,530,157,165,85,496,505,489,194,197,209,211,212];
+async function warm(path, env, cache) {
+  try {
+    const r = await fetch(UP + path, { headers: { "x-apisports-key": env.API_KEY } });
+    const txt = await r.text();
+    const bad = /"errors":\s*(\{[^}]|\[[^\]])/.test(txt) || /rateLimit|Too many requests/i.test(txt);
+    if (r.ok && !bad && !/"results":\s*0/.test(txt))
+      await cache.put(new Request(UP + path), new Response(txt, { headers: { "content-type": "application/json", "Cache-Control": "public, max-age=21600", "x-ts": String(Date.now()) } }));
+  } catch (e) {}
+}
+async function prewarm(env, withTeams) {
+  const cache = caches.default, d = new Date();
+  const season = d.getUTCMonth() < 6 ? d.getUTCFullYear() - 1 : d.getUTCFullYear();
+  for (const id of WL) { await warm("/standings?league=" + id + "&season=" + season, env, cache); await new Promise(r => setTimeout(r, 400)); }
+  if (withTeams) for (const id of WT) {
+    await warm("/fixtures?team=" + id + "&last=5", env, cache); await new Promise(r => setTimeout(r, 400));
+    await warm("/fixtures?team=" + id + "&next=5", env, cache); await new Promise(r => setTimeout(r, 400));
+  }
+}
+
 export default {
+  async scheduled(ev, env, ctx) { ctx.waitUntil(prewarm(env, new Date(ev.scheduledTime).getUTCMinutes() < 20)); },
   async fetch(req, env, ctx) {
     const origin = req.headers.get("Origin") || "";
     const list = (env.ALLOW || "").split(",").map(x => x.trim()).filter(Boolean);
