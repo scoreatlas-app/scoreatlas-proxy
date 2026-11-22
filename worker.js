@@ -31,8 +31,45 @@ async function prewarm(env, withTeams) {
   }
 }
 
+// ---- Scheidsrechters: elke 30 min wordt 1 competitie verwerkt en bewaard (Durable Object "__refs") ----
+const RL = [39,140,135,78,61,88,144,94,203,71,128,2,3,848,40,179,207,218,113,103,119,253,307,262,136,79,62,141,1,4,5,13,11,45];
+async function apiJ(path, env) {
+  const r = await fetch(UP + path, { headers: { "x-apisports-key": env.API_KEY } });
+  const j = await r.json();
+  if (!r.ok || (j.errors && (Array.isArray(j.errors) ? j.errors.length : Object.keys(j.errors).length))) throw new Error("api");
+  return j.response || [];
+}
+async function refJob(env, k) {
+  const id = RL[k % RL.length], y = new Date().getUTCFullYear();
+  let fx = [], season = y;
+  for (const s of [y, y - 1]) {
+    try { fx = (await apiJ("/fixtures?league=" + id + "&season=" + s + "&status=FT", env)).filter(f => f.fixture.referee); } catch (e) { fx = []; }
+    if (fx.length) { season = s; break; }
+  }
+  if (!fx.length) return;
+  fx = fx.slice(-400);
+  const o = {}, name = fx[0].league.country + " · " + fx[0].league.name;
+  const proc = d => d.forEach(f => {
+    const n = f.fixture.referee; if (!n) return;
+    const q = o[n] = o[n] || { m: 0, y: 0, r: 0, f: 0, fc: 0, p: 0, g: 0, fi: "9999", la: "0" }, dt = f.fixture.date.slice(0, 10);
+    q.m++; q.g += (f.goals.home || 0) + (f.goals.away || 0); if (dt < q.fi) q.fi = dt; if (dt > q.la) q.la = dt;
+    (f.events || []).forEach(e => { const dd = String(e.detail || ""); if (e.type == "Card") { if (/second yellow|red/i.test(dd)) q.r++; else if (/yellow/i.test(dd)) q.y++; } else if (e.type == "Goal" && /^penalty/i.test(dd) || /missed penalty/i.test(dd)) q.p++; });
+    let fl = 0, ok = false; (f.statistics || []).forEach(z => { const v = (z.statistics || []).find(t => t.type == "Fouls"); if (v && v.value != null) { fl += +v.value || 0; ok = true; } });
+    if (ok) { q.f += fl; q.fc++; }
+  });
+  const ch = []; for (let i = 0; i < fx.length; i += 20) ch.push(fx.slice(i, i + 20));
+  const work = async () => { while (ch.length) { const c = ch.shift(); try { proc(await apiJ("/fixtures?ids=" + c.map(f => f.fixture.id).join("-"), env)); } catch (e) {} } };
+  await Promise.all([work(), work(), work(), work(), work()]);
+  if (!Object.keys(o).length) return;
+  const stub = env.CHAT.get(env.CHAT.idFromName("__refs"));
+  await stub.fetch("https://chat/rput", { method: "POST", body: JSON.stringify({ id, n: name, s: season, t: Date.now(), rows: o }) });
+}
+
 export default {
-  async scheduled(ev, env, ctx) { ctx.waitUntil(prewarm(env, new Date(ev.scheduledTime).getUTCMinutes() < 20)); },
+  async scheduled(ev, env, ctx) {
+    if (ev.cron === "7,37 * * * *") { if (env.CHAT) ctx.waitUntil(refJob(env, Math.floor(ev.scheduledTime / 1800000))); return; }
+    ctx.waitUntil(prewarm(env, new Date(ev.scheduledTime).getUTCMinutes() < 20));
+  },
   async fetch(req, env, ctx) {
     const origin = req.headers.get("Origin") || "";
     const list = (env.ALLOW || "").split(",").map(x => x.trim()).filter(Boolean);
@@ -58,6 +95,15 @@ export default {
       if (body && body.length > 3000) return new Response("Too large", { status: 413, headers: cors });
       const stub = env.CHAT.get(env.CHAT.idFromName(room));
       const r = await stub.fetch("https://chat/x?u=" + encodeURIComponent((u.searchParams.get("u") || "").slice(0, 40)) + "&ip=" + encodeURIComponent(req.headers.get("cf-connecting-ip") || ""), { method: req.method, body });
+      const out = new Response(r.body, r);
+      Object.entries(cors).forEach(([k, v]) => out.headers.set(k, v));
+      out.headers.set("Cache-Control", "no-store");
+      return out;
+    }
+    if (u.pathname === "/refs") {
+      if (!ok || req.method !== "GET") return new Response("Forbidden", { status: 403, headers: cors });
+      if (!env.CHAT) return new Response("[]", { headers: { ...cors, "content-type": "application/json" } });
+      const r = await env.CHAT.get(env.CHAT.idFromName("__refs")).fetch("https://chat/rget");
       const out = new Response(r.body, r);
       Object.entries(cors).forEach(([k, v]) => out.headers.set(k, v));
       out.headers.set("Cache-Control", "no-store");
@@ -106,6 +152,8 @@ export class Chat {
   async fetch(req) {
     const u = new URL(req.url), me = (u.searchParams.get("u") || "").slice(0, 40), ip = u.searchParams.get("ip") || "";
     const J = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { "content-type": "application/json" } });
+    if (u.pathname === "/rput") { const b = JSON.parse(await req.text()); await this.s.storage.put("r:" + b.id, b); return J({ ok: 1 }); }
+    if (u.pathname === "/rget") { const m = await this.s.storage.list({ prefix: "r:" }); return J([...m.values()]); }
     let list = (await this.s.storage.get("m")) || [];
     if (req.method === "GET") {
       return J(list.filter(x => (x.r || []).length < 3).slice(-300).map(x => ({
