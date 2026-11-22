@@ -3,10 +3,10 @@
 const UP = "https://v3.football.api-sports.io";
 const ttl = p =>
   p.startsWith("/fixtures") && p.includes("live=") ? 20 :
-  p.startsWith("/standings") ? 300 :
+  p.startsWith("/standings") ? 600 :
   p.startsWith("/fixtures") ? 60 :
   p.startsWith("/coachs") ? 86400 :
-  p.startsWith("/players") ? 3600 : 120;
+  p.startsWith("/players") ? 3600 : 180;
 
 export default {
   async fetch(req, env, ctx) {
@@ -17,6 +17,7 @@ export default {
       "Access-Control-Allow-Origin": list.length ? (ok ? origin : list[0]) : "*",
       "Access-Control-Allow-Headers": "*",
       "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+      "Access-Control-Max-Age": "86400",
       "Vary": "Origin"
     };
     if (req.method === "OPTIONS") return new Response(null, { headers: cors });
@@ -42,23 +43,34 @@ export default {
     if (!/^\/(fixtures|standings|leagues|players|coachs|injuries|teams|transfers|sidelined|venues|countries|trophies)/.test(u.pathname)) return new Response("Not found", { status: 404, headers: cors });
     const cache = caches.default;
     const key = new Request(UP + path);
-    let res = await cache.match(key);
-    if (!res) {
+    const T = ttl(path) * 1000;
+    // Haalt vers antwoord op bij API-Football; bewaart het 6 uur (als "oud" antwoord blijft het bruikbaar)
+    const fetchFresh = async (tries) => {
       let up, txt;
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < tries; i++) {
         up = await fetch(UP + path, { headers: { "x-apisports-key": env.API_KEY } });
         txt = await up.text();
         if (!/rateLimit|Too many requests/i.test(txt)) break;
-        await new Promise(r => setTimeout(r, 1200 * (i + 1)));
+        if (i < tries - 1) await new Promise(r => setTimeout(r, 700 * (i + 1)));
       }
       const bad = /"errors":\s*(\{[^}]|\[[^\]])/.test(txt) || /rateLimit|Too many requests/i.test(txt);
-      res = new Response(txt, { status: up.status, headers: { "content-type": "application/json" } });
+      const r = new Response(txt, { status: up.status, headers: { "content-type": "application/json" } });
       if (up.ok && !bad) {
-        res.headers.set("Cache-Control", "public, max-age=" + ttl(path));
-        ctx.waitUntil(cache.put(key, res.clone()));
+        const st = new Response(txt, { headers: { "content-type": "application/json", "Cache-Control": "public, max-age=21600", "x-ts": String(Date.now()) } });
+        ctx.waitUntil(cache.put(key, st));
       }
+      return { r, ok: up.ok && !bad };
+    };
+    let res = await cache.match(key);
+    const age = res ? Date.now() - Number(res.headers.get("x-ts") || 0) : 0;
+    const maxStale = T <= 60000 ? 120000 : 21600000; // live/wedstrijden: max 2 min oud tonen
+    if (res && age <= maxStale) {
+      if (age > T) ctx.waitUntil(fetchFresh(2)); // verouderd: direct tonen, op achtergrond verversen
+    } else {
+      res = (await fetchFresh(3)).r;
     }
     const out = new Response(res.body, res);
+    out.headers.set("Cache-Control", "no-store");
     Object.entries(cors).forEach(([k, v]) => out.headers.set(k, v));
     return out;
   }
