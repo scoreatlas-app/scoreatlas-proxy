@@ -3,6 +3,10 @@
   "main": "worker.js",
   "compatibility_date": "2025-01-01",
   "vars": {
-    "ALLOW": "https://rcanturkoglu.github.io,https://scoreatlas.org,https://www.scoreatlas.org"
-  }
+    "ALLOW": "https://scoreatlas.org,https://www.scoreatlas.org"
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "CHAT", "class_name": "Chat" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Chat"] }]
 }
