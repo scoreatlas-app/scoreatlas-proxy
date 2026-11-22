@@ -1,0 +1,8 @@
+{
+  "name": "scoreatlas",
+  "main": "worker.js",
+  "compatibility_date": "2025-01-01",
+  "vars": {
+    "ALLOW": "https://rcanturkoglu.github.io,https://scoreatlas.org,https://www.scoreatlas.org"
+  }
+}
