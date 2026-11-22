@@ -3,6 +3,7 @@
 const UP = "https://v3.football.api-sports.io";
 const ttl = p =>
   p.startsWith("/fixtures") && p.includes("live=") ? 20 :
+  p.startsWith("/fixtures") && (p.includes("status=FT") || p.includes("ids=")) ? 3600 :
   p.startsWith("/standings") ? 600 :
   p.startsWith("/fixtures") ? 60 :
   p.startsWith("/coachs") ? 86400 :
