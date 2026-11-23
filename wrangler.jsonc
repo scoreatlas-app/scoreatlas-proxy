@@ -6,8 +6,8 @@
     "ALLOW": "https://scoreatlas.org,https://www.scoreatlas.org"
   },
   "durable_objects": {
-    "bindings": [{ "name": "CHAT", "class_name": "Chat" }]
+    "bindings": [{ "name": "CHAT", "class_name": "Chat" }, { "name": "LIVE", "class_name": "Live" }]
   },
   "triggers": { "crons": ["*/20 * * * *", "7,37 * * * *"] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Chat"] }]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Chat"] }, { "tag": "v2", "new_sqlite_classes": ["Live"] }]
 }

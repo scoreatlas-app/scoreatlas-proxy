@@ -86,6 +86,15 @@ export default {
     const u = new URL(req.url);
     const path = u.pathname + u.search;
     if (u.pathname === "/") return new Response("ScoreAtlas proxy OK", { headers: cors });
+    if (u.pathname === "/live") {
+      if (!ok || req.method !== "GET") return new Response("Forbidden", { status: 403, headers: cors });
+      if (!env.LIVE) return new Response("Live niet beschikbaar", { status: 501, headers: cors });
+      const r = await env.LIVE.get(env.LIVE.idFromName("live")).fetch("https://live/sse");
+      const out = new Response(r.body, { status: r.status, headers: r.headers });
+      Object.entries(cors).forEach(([k, v]) => out.headers.set(k, v));
+      out.headers.set("Cache-Control", "no-store");
+      return out;
+    }
     if (u.pathname === "/chat") {
       if (!ok) return new Response("Forbidden", { status: 403, headers: cors });
       if (!env.CHAT) return new Response(JSON.stringify({ error: "Forum niet beschikbaar" }), { status: 501, headers: { ...cors, "content-type": "application/json" } });
@@ -201,5 +210,68 @@ export class Chat {
       await save(); return J({ ok: 1 });
     }
     return J({ error: "Bad request" }, 400);
+  }
+}
+
+// ---- Live push: 1 Durable Object haalt live=all op (zolang er bezoekers zijn) en stuurt alleen veranderingen via SSE ----
+// Variabele (optioneel): LIVE_MS = interval in ms (standaard 5000). Past zichzelf aan als het dagquotum van API-Football bijna op is.
+export class Live {
+  constructor(state, env) {
+    this.s = state; this.env = env; this.cl = new Set(); this.sig = new Map(); this.mn = "";
+    this.ready = false; this.running = false; this.empty = false; this.rem = null; this.enc = new TextEncoder();
+  }
+  put(c, str) {
+    try {
+      if (c.w.desiredSize !== null && c.w.desiredSize < -3) { this.cl.delete(c); try { c.w.abort(); } catch (e) {} return; }
+      c.w.write(this.enc.encode(str)).catch(() => this.cl.delete(c));
+    } catch (e) { this.cl.delete(c); }
+  }
+  all(str) { for (const c of [...this.cl]) this.put(c, str); }
+  async fetch(req) {
+    const { readable, writable } = new TransformStream();
+    const c = { w: writable.getWriter() };
+    this.cl.add(c);
+    this.put(c, "retry: 3000\nevent: hi\ndata: " + Date.now() + "\n\n");
+    if (!this.running) { this.running = true; this.ready = false; this.sig = new Map(); this.mn = ""; setTimeout(() => this.tick(), 0); }
+    return new Response(readable, { headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", "x-accel-buffering": "no" } });
+  }
+  base() {
+    let ms = Math.max(2000, +this.env.LIVE_MS || 5000);
+    if (this.empty) ms = Math.max(ms, 30000);
+    const r = this.rem;
+    if (r != null) { if (r < 150) ms = Math.max(ms, 120000); else if (r < 600) ms = Math.max(ms, 30000); else if (r < 1500) ms = Math.max(ms, 15000); }
+    return ms;
+  }
+  async tick() {
+    if (!this.cl.size) { this.running = false; this.ready = false; return; }
+    let wait = this.base();
+    try { await this.pull(); } catch (e) { wait = Math.max(wait, 10000); }
+    this.all("event: hb\ndata: " + Date.now() + "\n\n");
+    setTimeout(() => this.tick(), wait);
+  }
+  async pull() {
+    const r = await fetch(UP + "/fixtures?live=all", { headers: { "x-apisports-key": this.env.API_KEY } });
+    const rem = parseInt(r.headers.get("x-ratelimit-requests-remaining"), 10);
+    if (!isNaN(rem)) this.rem = rem;
+    const txt = await r.text();
+    if (!r.ok || /rateLimit|Too many requests/i.test(txt)) throw new Error("api");
+    const j = JSON.parse(txt);
+    if (j.errors && (Array.isArray(j.errors) ? j.errors.length : Object.keys(j.errors).length)) throw new Error("api");
+    const arr = j.response || [];
+    this.empty = !arr.length;
+    const nx = new Map(), ch = [], mn = {};
+    for (const f of arr) {
+      const id = f.fixture.id, st = f.fixture.status || {};
+      mn[id] = st.elapsed;
+      const sg = [f.goals.home, f.goals.away, st.short, (f.events || []).map(e => (e.time && e.time.elapsed) + e.type + e.detail + (e.player && e.player.id)).join("|")].join("~");
+      nx.set(id, sg);
+      if (this.ready && this.sig.get(id) !== sg) ch.push(f);
+    }
+    const wasReady = this.ready;
+    this.sig = nx; this.ready = true;
+    if (!wasReady) { this.mn = JSON.stringify(mn); return; }
+    if (ch.length) this.all("event: d\ndata: " + JSON.stringify(ch) + "\n\n");
+    const m = JSON.stringify(mn);
+    if (m !== this.mn) { this.mn = m; this.all("event: m\ndata: " + m + "\n\n"); }
   }
 }
