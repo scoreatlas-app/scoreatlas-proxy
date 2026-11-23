@@ -2,11 +2,12 @@
 // Secret: API_KEY (jouw API-Football key). Optioneel variabele: ALLOW = "https://scoreatlas.org"
 const UP = "https://v3.football.api-sports.io";
 const ttl = p =>
-  p.startsWith("/fixtures") && p.includes("live=") ? 20 :
+  p.startsWith("/fixtures") && p.includes("live=") ? 15 :
   p.startsWith("/fixtures") && (p.includes("status=FT") || p.includes("ids=")) ? 3600 :
   p.startsWith("/standings") ? 600 :
   p.startsWith("/fixtures") ? 60 :
   p.startsWith("/coachs") ? 86400 :
+  p.startsWith("/players/squads") ? 21600 :
   p.startsWith("/players") ? 3600 : 180;
 
 // ---- Vooraf ophalen (cron): populaire competities en clubs staan klaar in de cache ----
