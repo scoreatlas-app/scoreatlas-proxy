@@ -3,7 +3,8 @@
   "main": "worker.js",
   "compatibility_date": "2025-01-01",
   "vars": {
-    "ALLOW": "https://scoreatlas.org,https://www.scoreatlas.org"
+    "ALLOW": "https://scoreatlas.org,https://www.scoreatlas.org",
+    "VAPID_PUBLIC": "BFGfH113pvPNDiY931ecVEfe8j6DzOVbdO5lAvd2ED2iNx1UrKZSgJ_uhlUoIi7g64WGdw9Z6xhpghVq4mJsxEU"
   },
   "durable_objects": {
     "bindings": [{ "name": "CHAT", "class_name": "Chat" }, { "name": "LIVE", "class_name": "Live" }]
