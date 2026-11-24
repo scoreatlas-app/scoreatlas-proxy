@@ -86,6 +86,29 @@ export default {
     const u = new URL(req.url);
     const path = u.pathname + u.search;
     if (u.pathname === "/") return new Response("ScoreAtlas proxy OK", { headers: cors });
+    if (u.pathname === "/usage") {
+      // Toont hoeveel API-aanvragen vandaag gebruikt zijn. /status van API-Football telt zelf niet mee. 60 s in geheugen.
+      const ck = new Request("https://usage.cache/v1"); let d = null;
+      const hit = await caches.default.match(ck);
+      if (hit) d = await hit.json();
+      else {
+        try {
+          const r = await fetch(UP + "/status", { headers: { "x-apisports-key": env.API_KEY } });
+          const j = await r.json(), q = (j.response || {}).requests || {}, sub = (j.response || {}).subscription || {};
+          d = { used: +q.current || 0, limit: +q.limit_day || 0, plan: sub.plan || "", t: Date.now() };
+          if (d.limit) await caches.default.put(ck, new Response(JSON.stringify(d), { headers: { "Cache-Control": "public, max-age=60" } }));
+        } catch (e) { d = null; }
+      }
+      const H = { "content-type": "application/json", "Cache-Control": "no-store", ...cors };
+      if (!d || !d.limit) return new Response(JSON.stringify({ error: "geen gegevens" }), { status: 502, headers: H });
+      const left = Math.max(0, d.limit - d.used), pct = Math.min(100, Math.round(d.used / d.limit * 100));
+      if (u.searchParams.get("json") !== null || /application\/json/.test(req.headers.get("accept") || "") && !/text\/html/.test(req.headers.get("accept") || ""))
+        return new Response(JSON.stringify({ used: d.used, limit: d.limit, left, pct, plan: d.plan }), { headers: H });
+      const col = pct < 60 ? "#16a24a" : pct < 85 ? "#e0a800" : "#d33";
+      const f = n => n.toLocaleString("nl-NL");
+      const html = `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Gebruik</title><body style="font:18px -apple-system,system-ui,sans-serif;margin:0;padding:28px;background:#f3f8f4;color:#0b2b17"><h1 style="font-size:22px;margin:0 0 6px">API-gebruik vandaag</h1><p style="margin:0 0 18px;color:#567">Abonnement: ${d.plan || "onbekend"} · bijgewerkt ${new Date(d.t || Date.now()).toLocaleTimeString("nl-NL", { timeZone: "Europe/Amsterdam", hour: "2-digit", minute: "2-digit" })}</p><div style="background:#dfe9e2;border-radius:12px;height:26px;overflow:hidden"><div style="width:${pct}%;height:100%;background:${col}"></div></div><p style="font-size:34px;font-weight:800;margin:14px 0 2px">${f(d.used)} <span style="font-size:18px;font-weight:600;color:#567">van ${f(d.limit)}</span></p><p style="margin:0 0 18px">${pct}% gebruikt · nog <b>${f(left)}</b> over</p><p style="color:#567;font-size:15px">De teller begint elke nacht om 00:00 UTC opnieuw (01:00 in de winter, 02:00 in de zomer). Boven 85% (rood): overweeg een groter abonnement.</p>`;
+      return new Response(html, { headers: { "content-type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+    }
     if (u.pathname === "/live") {
       if (!ok || req.method !== "GET") return new Response("Forbidden", { status: 403, headers: cors });
       if (!env.LIVE) return new Response("Live niet beschikbaar", { status: 501, headers: cors });
