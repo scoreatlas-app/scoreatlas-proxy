@@ -1,10 +1,11 @@
 // ScoreAtlas proxy (Cloudflare Worker)
 // Secret: API_KEY (jouw API-Football key). Optioneel variabele: ALLOW = "https://scoreatlas.org"
-// Pushmeldingen: secret VAPID_PRIVATE, variabele VAPID_PUBLIC. Optioneel PUSH_MS (standaard 20000) = hoe vaak gecontroleerd wordt als niemand de site open heeft.
+// Pushmeldingen: secret VAPID_PRIVATE, variabele VAPID_PUBLIC. Optioneel PUSH_MS (standaard 60000) = hoe vaak gecontroleerd wordt als niemand de site open heeft.
 const UP = "https://v3.football.api-sports.io";
 const ttl = p =>
   p.startsWith("/fixtures") && p.includes("live=") ? 15 :
-  p.startsWith("/fixtures") && (p.includes("status=FT") || p.includes("ids=")) ? 3600 :
+  p.startsWith("/fixtures") && p.includes("status=FT") ? 3600 :
+  p.startsWith("/fixtures") && p.includes("ids=") ? 60 :
   p.startsWith("/standings") ? 600 :
   p.startsWith("/fixtures") ? 60 :
   p.startsWith("/coachs") ? 86400 :
@@ -131,7 +132,9 @@ export default {
   async scheduled(ev, env, ctx) {
     if (env.LIVE) ctx.waitUntil(env.LIVE.get(env.LIVE.idFromName("live")).fetch("https://live/wake").catch(() => {}));
     if (ev.cron === "7,37 * * * *") { if (env.CHAT) ctx.waitUntil(refJob(env, Math.floor(ev.scheduledTime / 1800000))); return; }
-    ctx.waitUntil(prewarm(env, new Date(ev.scheduledTime).getUTCMinutes() < 20));
+    const dt = new Date(ev.scheduledTime);
+    // Zuinig met het API-quotum: standen 1x per uur, clubwedstrijden 1x per 3 uur
+    if (dt.getUTCMinutes() < 20) ctx.waitUntil(prewarm(env, dt.getUTCHours() % 3 === 0));
   },
   async fetch(req, env, ctx) {
     const origin = req.headers.get("Origin") || "";
@@ -310,7 +313,7 @@ export class Chat {
 }
 
 // ---- Live push: 1 Durable Object haalt live=all op (zolang er bezoekers zijn) en stuurt alleen veranderingen via SSE ----
-// Variabele (optioneel): LIVE_MS = interval in ms (standaard 5000). Past zichzelf aan als het dagquotum van API-Football bijna op is.
+// Variabele (optioneel): LIVE_MS = interval in ms (standaard 15000). Past zichzelf aan als het dagquotum van API-Football bijna op is.
 export class Live {
   constructor(state, env) {
     this.s = state; this.env = env; this.cl = new Set(); this.sig = new Map(); this.mn = "";
@@ -324,7 +327,7 @@ export class Live {
     await this.loadSubs();
     if (!this.subs.size) return;
     if (!this.running) { try { await this.pull(); } catch (e) {} }
-    const next = this.running ? 60000 : Math.max(+this.env.PUSH_MS || 20000, this.base());
+    const next = this.running ? 60000 : Math.max(+this.env.PUSH_MS || 60000, this.base());
     await this.s.storage.setAlarm(Date.now() + next);
   }
   async api(req, path) {
@@ -400,7 +403,7 @@ export class Live {
     return new Response(readable, { headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", "x-accel-buffering": "no" } });
   }
   base() {
-    let ms = Math.max(2000, +this.env.LIVE_MS || 5000);
+    let ms = Math.max(2000, +this.env.LIVE_MS || 15000);
     if (this.empty) ms = Math.max(ms, 30000);
     const r = this.rem;
     if (r != null) { if (r < 150) ms = Math.max(ms, 120000); else if (r < 600) ms = Math.max(ms, 30000); else if (r < 1500) ms = Math.max(ms, 15000); }
