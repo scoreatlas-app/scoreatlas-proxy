@@ -108,14 +108,16 @@ async function encryptPayload(sub, text) {
   const rs = new Uint8Array([0, 0, 16, 0]);
   return cat(salt, rs, new Uint8Array([asPub.length]), asPub, ct);
 }
+let LASTERR = "";
 // Geeft de HTTP-status terug (201 = gelukt, 404/410 = abonnement bestaat niet meer)
 async function sendPush(sub, payload, env, ttl) {
   const body = await encryptPayload(sub, JSON.stringify(payload));
   const r = await fetch(sub.endpoint, {
     method: "POST",
-    headers: { "Authorization": await vapidAuth(sub.endpoint, env), "Content-Encoding": "aes128gcm", "Content-Type": "application/octet-stream", "TTL": String(ttl || 300), "Urgency": "high", "Topic": (payload.tag || "sa").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32) },
+    headers: { "Authorization": await vapidAuth(sub.endpoint, env), "Content-Encoding": "aes128gcm", "Content-Type": "application/octet-stream", "TTL": String(ttl || 300), "Urgency": "high" },
     body
   });
+  if (r.status >= 300) { try { LASTERR = r.status + " " + (await r.text()).slice(0, 200); } catch (e) { LASTERR = String(r.status); } }
   return r.status;
 }
 const PW = {
@@ -338,8 +340,8 @@ export class Live {
     const l = /^[a-z]{2}$/.test(b.l || "") ? b.l : "en";
     const clean = { endpoint: ep, keys: { p256dh: String(sub.keys.p256dh).slice(0, 200), auth: String(sub.keys.auth).slice(0, 100) } };
     if (path === "/test") {
-      const st = await sendPush(clean, { title: "✅ ScoreAtlas", body: ({ nl: "Meldingen staan aan. Je krijgt een melding bij elk doelpunt van je ⭐-wedstrijden en -teams.", tr: "Bildirimler açık. ⭐ maçlarında ve takımlarında her golde bildirim alırsın." }[l]) || "Notifications are on. You'll get an alert for every goal in your ⭐ matches and teams.", url: "/", tag: "test" }, this.env, 60).catch(() => 0);
-      return J({ ok: st >= 200 && st < 300, status: st });
+      const st = await sendPush(clean, { title: "✅ ScoreAtlas", body: ({ nl: "Meldingen staan aan. Je krijgt een melding bij elk doelpunt van je ⭐-wedstrijden en -teams.", tr: "Bildirimler açık. ⭐ maçlarında ve takımlarında her golde bildirim alırsın." }[l]) || "Notifications are on. You'll get an alert for every goal in your ⭐ matches and teams.", url: "/", tag: "test" }, this.env, 60).catch(e => { LASTERR = "fout: " + (e && e.message || e); return 0; });
+      return J({ ok: st >= 200 && st < 300, status: st, err: st >= 200 && st < 300 ? "" : LASTERR, host: new URL(clean.endpoint).host });
     }
     if (path === "/sub") {
       const t = (Array.isArray(b.t) ? b.t : []).map(x => String(x).slice(0, 60)).slice(0, 60);
