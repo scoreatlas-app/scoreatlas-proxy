@@ -1,11 +1,9 @@
 // ScoreAtlas proxy (Cloudflare Worker)
 // Secret: API_KEY (jouw API-Football key). Optioneel variabele: ALLOW = "https://scoreatlas.org"
-// Pushmeldingen: secret VAPID_PRIVATE, variabele VAPID_PUBLIC. Optioneel PUSH_MS (standaard 60000) = hoe vaak gecontroleerd wordt als niemand de site open heeft.
 const UP = "https://v3.football.api-sports.io";
 const ttl = p =>
   p.startsWith("/fixtures") && p.includes("live=") ? 15 :
-  p.startsWith("/fixtures") && p.includes("status=FT") ? 3600 :
-  p.startsWith("/fixtures") && p.includes("ids=") ? 60 :
+  p.startsWith("/fixtures") && (p.includes("status=FT") || p.includes("ids=")) ? 3600 :
   p.startsWith("/standings") ? 600 :
   p.startsWith("/fixtures") ? 60 :
   p.startsWith("/coachs") ? 86400 :
@@ -68,73 +66,10 @@ async function refJob(env, k) {
   await stub.fetch("https://chat/rput", { method: "POST", body: JSON.stringify({ id, n: name, s: season, t: Date.now(), rows: o }) });
 }
 
-// ---- Web Push (VAPID + aes128gcm), zonder extra pakketten ----
-// Secret: VAPID_PRIVATE  ·  Variabele: VAPID_PUBLIC (staat in wrangler.jsonc)
-const b64u = {
-  enc: b => { let s = ""; const a = new Uint8Array(b); for (let i = 0; i < a.length; i++) s += String.fromCharCode(a[i]); return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); },
-  dec: s => { s = String(s).replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "="; const t = atob(s), a = new Uint8Array(t.length); for (let i = 0; i < t.length; i++) a[i] = t.charCodeAt(i); return a; }
-};
-const cat = (...xs) => { const n = xs.reduce((a, x) => a + x.length, 0), o = new Uint8Array(n); let p = 0; for (const x of xs) { o.set(x, p); p += x.length; } return o; };
-const te = new TextEncoder();
-async function hmac(key, data) { const k = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]); return new Uint8Array(await crypto.subtle.sign("HMAC", k, data)); }
-let VKEY = null;
-async function vapidKey(env) {
-  if (VKEY) return VKEY;
-  const pub = b64u.dec(env.VAPID_PUBLIC);
-  const jwk = { kty: "EC", crv: "P-256", x: b64u.enc(pub.slice(1, 33)), y: b64u.enc(pub.slice(33, 65)), d: env.VAPID_PRIVATE, ext: true };
-  VKEY = await crypto.subtle.importKey("jwk", jwk, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
-  return VKEY;
-}
-async function vapidAuth(endpoint, env) {
-  const aud = new URL(endpoint).origin;
-  const h = b64u.enc(te.encode(JSON.stringify({ typ: "JWT", alg: "ES256" })));
-  const c = b64u.enc(te.encode(JSON.stringify({ aud, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: "https://scoreatlas.org" })));
-  const sig = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, await vapidKey(env), te.encode(h + "." + c)));
-  return "vapid t=" + h + "." + c + "." + b64u.enc(sig) + ", k=" + env.VAPID_PUBLIC;
-}
-async function encryptPayload(sub, text) {
-  const ua = b64u.dec(sub.keys.p256dh), auth = b64u.dec(sub.keys.auth);
-  const eph = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
-  const asPub = new Uint8Array(await crypto.subtle.exportKey("raw", eph.publicKey));
-  const uaKey = await crypto.subtle.importKey("raw", ua, { name: "ECDH", namedCurve: "P-256" }, false, []);
-  const shared = new Uint8Array(await crypto.subtle.deriveBits({ name: "ECDH", public: uaKey }, eph.privateKey, 256));
-  const prkKey = await hmac(auth, shared);
-  const ikm = await hmac(prkKey, cat(te.encode("WebPush: info\0"), ua, asPub, new Uint8Array([1])));
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const prk = await hmac(salt, ikm);
-  const cek = (await hmac(prk, cat(te.encode("Content-Encoding: aes128gcm\0"), new Uint8Array([1])))).slice(0, 16);
-  const nonce = (await hmac(prk, cat(te.encode("Content-Encoding: nonce\0"), new Uint8Array([1])))).slice(0, 12);
-  const key = await crypto.subtle.importKey("raw", cek, "AES-GCM", false, ["encrypt"]);
-  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, key, cat(te.encode(text), new Uint8Array([2]))));
-  const rs = new Uint8Array([0, 0, 16, 0]);
-  return cat(salt, rs, new Uint8Array([asPub.length]), asPub, ct);
-}
-let LASTERR = "";
-// Geeft de HTTP-status terug (201 = gelukt, 404/410 = abonnement bestaat niet meer)
-async function sendPush(sub, payload, env, ttl) {
-  const body = await encryptPayload(sub, JSON.stringify(payload));
-  const r = await fetch(sub.endpoint, {
-    method: "POST",
-    headers: { "Authorization": await vapidAuth(sub.endpoint, env), "Content-Encoding": "aes128gcm", "Content-Type": "application/octet-stream", "TTL": String(ttl || 300), "Urgency": "high" },
-    body
-  });
-  if (r.status >= 300) { try { LASTERR = r.status + " " + (await r.text()).slice(0, 200); } catch (e) { LASTERR = String(r.status); } }
-  return r.status;
-}
-const PW = {
-  goal: { nl: "GOAL", tr: "GOL", en: "GOAL", us: "GOAL", es: "GOL", la: "GOL", de: "TOR", fr: "BUT", it: "GOL", pt: "GOLO", br: "GOL", zh: "进球", ja: "ゴール", ko: "골" },
-  no: { nl: "Doelpunt afgekeurd", tr: "Gol iptal edildi", en: "Goal disallowed", us: "Goal disallowed", es: "Gol anulado", la: "Gol anulado", de: "Tor aberkannt", fr: "But refusé", it: "Gol annullato", pt: "Golo anulado", br: "Gol anulado", zh: "进球无效", ja: "ゴール取り消し", ko: "골 취소" },
-  og: { nl: "eigen doelpunt", tr: "kendi kalesine", en: "own goal", us: "own goal", es: "en propia", la: "en contra", de: "Eigentor", fr: "csc", it: "autogol", pt: "autogolo", br: "gol contra", zh: "乌龙球", ja: "オウンゴール", ko: "자책골" },
-  pen: { nl: "penalty", tr: "penaltı", en: "penalty", us: "penalty", es: "penalti", la: "penal", de: "Elfmeter", fr: "penalty", it: "rigore", pt: "penálti", br: "pênalti", zh: "点球", ja: "PK", ko: "페널티킥" }
-};
-
 export default {
   async scheduled(ev, env, ctx) {
-    if (env.LIVE) ctx.waitUntil(env.LIVE.get(env.LIVE.idFromName("live")).fetch("https://live/wake").catch(() => {}));
     if (ev.cron === "7,37 * * * *") { if (env.CHAT) ctx.waitUntil(refJob(env, Math.floor(ev.scheduledTime / 1800000))); return; }
-    const dt = new Date(ev.scheduledTime);
-    // Zuinig met het API-quotum: standen 1x per uur, clubwedstrijden 1x per 3 uur
-    if (dt.getUTCMinutes() < 20) ctx.waitUntil(prewarm(env, dt.getUTCHours() % 3 === 0));
+    ctx.waitUntil(prewarm(env, new Date(ev.scheduledTime).getUTCMinutes() < 20));
   },
   async fetch(req, env, ctx) {
     const origin = req.headers.get("Origin") || "";
@@ -183,17 +118,6 @@ export default {
       out.headers.set("Cache-Control", "no-store");
       return out;
     }
-    if (u.pathname.startsWith("/push/")) {
-      if (!ok || req.method !== "POST") return new Response("Forbidden", { status: 403, headers: cors });
-      if (!env.LIVE || !env.VAPID_PRIVATE || !env.VAPID_PUBLIC) return new Response(JSON.stringify({ error: "Push niet ingesteld" }), { status: 501, headers: { ...cors, "content-type": "application/json" } });
-      const body = await req.text();
-      if (body.length > 8000) return new Response("Too large", { status: 413, headers: cors });
-      const r = await env.LIVE.get(env.LIVE.idFromName("live")).fetch("https://live" + u.pathname.slice(5), { method: "POST", body });
-      const out = new Response(r.body, r);
-      Object.entries(cors).forEach(([k, v]) => out.headers.set(k, v));
-      out.headers.set("Cache-Control", "no-store");
-      return out;
-    }
     if (u.pathname === "/chat") {
       if (!ok) return new Response("Forbidden", { status: 403, headers: cors });
       if (!env.CHAT) return new Response(JSON.stringify({ error: "Forum niet beschikbaar" }), { status: 501, headers: { ...cors, "content-type": "application/json" } });
@@ -208,6 +132,19 @@ export default {
       Object.entries(cors).forEach(([k, v]) => out.headers.set(k, v));
       out.headers.set("Cache-Control", "no-store");
       return out;
+    }
+    if (u.pathname === "/am") {
+      // Amateur- en jeugdwedstrijden: alleen voor Nederlandse IP-adressen.
+      if (!ok) return new Response("Forbidden", { status: 403, headers: cors });
+      const H = { ...cors, "content-type": "application/json", "Cache-Control": "no-store" };
+      const nl = ((req.cf && req.cf.country) || req.headers.get("cf-ipcountry") || "") === "NL";
+      if (!nl) return new Response(JSON.stringify({ nl: false, list: [] }), { headers: H });
+      if (!env.CHAT) return new Response(JSON.stringify({ error: "Niet beschikbaar" }), { status: 501, headers: H });
+      if (req.method !== "GET" && req.method !== "POST") return new Response("Method", { status: 405, headers: cors });
+      const body = req.method === "POST" ? await req.text() : null;
+      if (body && body.length > 1500) return new Response("Too large", { status: 413, headers: cors });
+      const r = await env.CHAT.get(env.CHAT.idFromName("__am")).fetch("https://chat/am?ip=" + encodeURIComponent(req.headers.get("cf-connecting-ip") || ""), { method: req.method, body });
+      return new Response(r.body, { status: r.status, headers: H });
     }
     if (u.pathname === "/refs") {
       if (!ok || req.method !== "GET") return new Response("Forbidden", { status: 403, headers: cors });
@@ -261,6 +198,7 @@ export class Chat {
   async fetch(req) {
     const u = new URL(req.url), me = (u.searchParams.get("u") || "").slice(0, 40), ip = u.searchParams.get("ip") || "";
     const J = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { "content-type": "application/json" } });
+    if (u.pathname === "/am") return this.am(req, ip, J);
     if (u.pathname === "/rput") { const b = JSON.parse(await req.text()); await this.s.storage.put("r:" + b.id, b); return J({ ok: 1 }); }
     if (u.pathname === "/rget") { const m = await this.s.storage.list({ prefix: "r:" }); return J([...m.values()]); }
     let list = (await this.s.storage.get("m")) || [];
@@ -312,78 +250,62 @@ export class Chat {
   }
 }
 
+
+// ---- Amateur- en jeugdwedstrijden (alleen Nederland): opslag in dezelfde Durable Object-klasse (kamer "__am") ----
+Chat.prototype.am = async function (req, ip, J) {
+  const st = this.s.storage, now = Date.now(), DAY = 864e5;
+  const clean = x => String(x == null ? "" : x).replace(/[\u0000-\u001f\u007f<>"`\\]+/g, " ").replace(/ {2,}/g, " ").trim();
+  const bad = t => /(https?:|www\.|@\w|\b[a-z0-9-]+\.(com|net|org|nl|tr|io|me|ly|gg|co|xyz|info|biz|ru|cn)\b)/i.test(t);
+  const hash = async (id, code) => { const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(id + ":" + String(code))); return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, "0")).join(""); };
+  const pub = x => ({ id: x.id, h: x.h, a: x.a, c: x.c, ts: x.ts, sh: x.sh, sa: x.sa, ph: x.ph, up: x.up });
+  const admin = c => !!(this.env.ADMIN && c === this.env.ADMIN);
+  if (req.method === "GET") {
+    const all = await st.list({ prefix: "am:" }), out = [], del = [];
+    for (const [k, x] of all) { if (now - x.ts > 3 * DAY) { del.push(k); continue; } if ((x.rp || []).length >= 3) continue; out.push(pub(x)); }
+    if (del.length) await st.delete(del);
+    return J({ nl: true, list: out });
+  }
+  let b; try { b = JSON.parse(await req.text()); } catch (e) { return J({ error: "Bad request" }, 400); }
+  const a = b.a;
+  if (a === "new") {
+    const h = clean(b.h).slice(0, 30), aw = clean(b.w).slice(0, 30), c = clean(b.c).slice(0, 20), ts = +b.ts;
+    if (h.length < 2 || aw.length < 2 || bad(h) || bad(aw) || bad(c) || /[0-9]{6,}/.test(h + aw)) return J({ error: "bad_name" }, 400);
+    if (!(ts > now - 12 * 36e5 && ts < now + 30 * DAY)) return J({ error: "bad_time" }, 400);
+    const dk = "rl:" + new Date(now).toISOString().slice(0, 10) + ":" + ip, n = (await st.get(dk)) || 0;
+    if (n >= 6) return J({ error: "limit" }, 429);
+    const all = await st.list({ prefix: "am:" });
+    if (all.size >= 400) return J({ error: "limit" }, 429);
+    const id = crypto.randomUUID().replace(/-/g, "").slice(0, 8), code = [...crypto.getRandomValues(new Uint8Array(6))].map(v => "ABCDEFGHJKMNPQRSTUVWXYZ23456789"[v % 31]).join("");
+    const x = { id, h, a: aw, c, ts, sh: 0, sa: 0, ph: "ns", up: now, k: await hash(id, code), rp: [] };
+    await st.put("am:" + id, x); await st.put(dk, n + 1);
+    return J({ ok: 1, id, code });
+  }
+  const x = await st.get("am:" + String(b.id || "").slice(0, 16));
+  if (!x) return J({ error: "gone" }, 404);
+  const mine = async () => admin(b.code) || (b.code && (await hash(x.id, String(b.code).toUpperCase().trim())) === x.k);
+  if (a === "rep") {
+    const u = String(b.u || ip).slice(0, 40); x.rp = x.rp || [];
+    if (!x.rp.includes(u) && x.rp.length < 20) x.rp.push(u);
+    await st.put("am:" + x.id, x); return J({ ok: 1 });
+  }
+  if (!(await mine())) return J({ error: "code" }, 403);
+  if (a === "chk") return J({ ok: 1 });
+  if (a === "del") { await st.delete("am:" + x.id); return J({ ok: 1 }); }
+  if (a === "upd") {
+    const n = v => Math.max(0, Math.min(99, parseInt(v) || 0));
+    if (b.sh != null) x.sh = n(b.sh); if (b.sa != null) x.sa = n(b.sa);
+    if (["ns", "1h", "ht", "2h", "ft"].includes(b.ph)) x.ph = b.ph;
+    x.up = now; await st.put("am:" + x.id, x); return J({ ok: 1, x: pub(x) });
+  }
+  return J({ error: "Bad request" }, 400);
+};
+
 // ---- Live push: 1 Durable Object haalt live=all op (zolang er bezoekers zijn) en stuurt alleen veranderingen via SSE ----
-// Variabele (optioneel): LIVE_MS = interval in ms (standaard 15000). Past zichzelf aan als het dagquotum van API-Football bijna op is.
+// Variabele (optioneel): LIVE_MS = interval in ms (standaard 5000). Past zichzelf aan als het dagquotum van API-Football bijna op is.
 export class Live {
   constructor(state, env) {
     this.s = state; this.env = env; this.cl = new Set(); this.sig = new Map(); this.mn = "";
     this.ready = false; this.running = false; this.empty = false; this.rem = null; this.enc = new TextEncoder();
-    this.subs = null; this.gl = new Map(); this.lastPull = 0;
-  }
-  async loadSubs() { if (!this.subs) this.subs = new Map(await this.s.storage.list({ prefix: "s:" })); return this.subs; }
-  async skey(ep) { const h = new Uint8Array(await crypto.subtle.digest("SHA-256", te.encode(ep))); return "s:" + [...h.slice(0, 16)].map(x => x.toString(16).padStart(2, "0")).join(""); }
-  async wake() { await this.loadSubs(); if (this.subs.size && !(await this.s.storage.getAlarm())) await this.s.storage.setAlarm(Date.now() + 3000); }
-  async alarm() {
-    await this.loadSubs();
-    if (!this.subs.size) return;
-    if (!this.running) { try { await this.pull(); } catch (e) {} }
-    const next = this.running ? 60000 : Math.max(+this.env.PUSH_MS || 60000, this.base());
-    await this.s.storage.setAlarm(Date.now() + next);
-  }
-  async api(req, path) {
-    const J = (o, st = 200) => new Response(JSON.stringify(o), { status: st, headers: { "content-type": "application/json" } });
-    if (path === "/wake") { await this.wake(); return J({ ok: 1 }); }
-    let b; try { b = JSON.parse(await req.text()); } catch (e) { return J({ error: "Bad request" }, 400); }
-    const sub = b && b.sub, ep = sub && String(sub.endpoint || "");
-    if (!/^https:\/\/[^\s]{10,600}$/.test(ep)) return J({ error: "Bad subscription" }, 400);
-    await this.loadSubs();
-    const k = await this.skey(ep);
-    if (path === "/unsub") { this.subs.delete(k); await this.s.storage.delete(k); return J({ ok: 1 }); }
-    if (!sub.keys || !sub.keys.p256dh || !sub.keys.auth) return J({ error: "Bad subscription" }, 400);
-    const l = /^[a-z]{2}$/.test(b.l || "") ? b.l : "en";
-    const clean = { endpoint: ep, keys: { p256dh: String(sub.keys.p256dh).slice(0, 200), auth: String(sub.keys.auth).slice(0, 100) } };
-    if (path === "/test") {
-      const st = await sendPush(clean, { title: "✅ ScoreAtlas", body: ({ nl: "Meldingen staan aan. Je krijgt een melding bij elk doelpunt van je ⭐-wedstrijden en -teams.", tr: "Bildirimler açık. ⭐ maçlarında ve takımlarında her golde bildirim alırsın." }[l]) || "Notifications are on. You'll get an alert for every goal in your ⭐ matches and teams.", url: "/", tag: "test" }, this.env, 60).catch(e => { LASTERR = "fout: " + (e && e.message || e); return 0; });
-      return J({ ok: st >= 200 && st < 300, status: st, err: st >= 200 && st < 300 ? "" : LASTERR, host: new URL(clean.endpoint).host });
-    }
-    if (path === "/sub") {
-      const t = (Array.isArray(b.t) ? b.t : []).map(x => String(x).slice(0, 60)).slice(0, 60);
-      const f = (Array.isArray(b.f) ? b.f : []).map(x => +x).filter(x => x > 0).slice(0, 150);
-      const o = { sub: clean, t, f, l, ts: Date.now() };
-      this.subs.set(k, o); await this.s.storage.put(k, o);
-      await this.wake();
-      return J({ ok: 1 });
-    }
-    return J({ error: "Not found" }, 404);
-  }
-  async notify(evs) {
-    await this.loadSubs();
-    if (!this.subs.size || !evs.length) return;
-    const jobs = [];
-    for (const ev of evs) {
-      const f = ev.f, hn = f.teams.home.name, an = f.teams.away.name, id = f.fixture.id, g = [f.goals.home ?? 0, f.goals.away ?? 0];
-      for (const [k, o] of this.subs) {
-        if (!(o.f || []).includes(id) && !(o.t || []).includes(hn) && !(o.t || []).includes(an)) continue;
-        const L = o.l, sc = hn + " " + g[0] + "–" + g[1] + " " + an;
-        let p;
-        if (ev.k === "goal") {
-          const side = ev.side === 0 ? f.teams.home.id : ev.side === 1 ? f.teams.away.id : 0;
-          const ge = (f.events || []).filter(e => e.type === "Goal" && !/missed/i.test(e.detail || "") && (!side || (e.team && e.team.id === side))).pop();
-          const min = (f.fixture.status || {}).elapsed;
-          let who = ge && ge.player && ge.player.name ? ge.player.name : "";
-          if (who && /own/i.test(ge.detail || "")) who += " (" + (PW.og[L] || PW.og.en) + ")";
-          else if (who && /penalty/i.test(ge.detail || "")) who += " (" + (PW.pen[L] || PW.pen.en) + ")";
-          const mt = ge && ge.time && ge.time.elapsed ? ge.time.elapsed + (ge.time.extra ? "+" + ge.time.extra : "") : min;
-          p = { title: "⚽ " + (PW.goal[L] || PW.goal.en) + "! " + sc, body: (mt ? mt + "′ " : "") + who, url: "/?m=" + id, tag: "g" + id };
-        } else p = { title: "❌ " + (PW.no[L] || PW.no.en), body: sc, url: "/?m=" + id, tag: "g" + id };
-        jobs.push([k, o, p]);
-      }
-    }
-    for (let i = 0; i < jobs.length; i += 25) {
-      await Promise.all(jobs.slice(i, i + 25).map(async ([k, o, p]) => {
-        try { const st = await sendPush(o.sub, p, this.env, 300); if (st === 404 || st === 410) { this.subs.delete(k); await this.s.storage.delete(k); } } catch (e) {}
-      }));
-    }
   }
   put(c, str) {
     try {
@@ -393,24 +315,22 @@ export class Live {
   }
   all(str) { for (const c of [...this.cl]) this.put(c, str); }
   async fetch(req) {
-    const pth = new URL(req.url).pathname;
-    if (pth !== "/sse") return this.api(req, pth);
     const { readable, writable } = new TransformStream();
     const c = { w: writable.getWriter() };
     this.cl.add(c);
     this.put(c, "retry: 3000\nevent: hi\ndata: " + Date.now() + "\n\n");
-    if (!this.running) { this.running = true; if (Date.now() - this.lastPull > 60000) { this.ready = false; this.sig = new Map(); } this.mn = ""; setTimeout(() => this.tick(), 0); }
+    if (!this.running) { this.running = true; this.ready = false; this.sig = new Map(); this.mn = ""; setTimeout(() => this.tick(), 0); }
     return new Response(readable, { headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", "x-accel-buffering": "no" } });
   }
   base() {
-    let ms = Math.max(2000, +this.env.LIVE_MS || 15000);
+    let ms = Math.max(2000, +this.env.LIVE_MS || 5000);
     if (this.empty) ms = Math.max(ms, 30000);
     const r = this.rem;
     if (r != null) { if (r < 150) ms = Math.max(ms, 120000); else if (r < 600) ms = Math.max(ms, 30000); else if (r < 1500) ms = Math.max(ms, 15000); }
     return ms;
   }
   async tick() {
-    if (!this.cl.size) { this.running = false; this.wake().catch(() => {}); return; }
+    if (!this.cl.size) { this.running = false; this.ready = false; return; }
     let wait = this.base();
     try { await this.pull(); } catch (e) { wait = Math.max(wait, 10000); }
     this.all("event: hb\ndata: " + Date.now() + "\n\n");
@@ -426,19 +346,6 @@ export class Live {
     if (j.errors && (Array.isArray(j.errors) ? j.errors.length : Object.keys(j.errors).length)) throw new Error("api");
     const arr = j.response || [];
     this.empty = !arr.length;
-    if (Date.now() - this.lastPull > 180000) { this.ready = false; this.gl = new Map(); }
-    this.lastPull = Date.now();
-    // Doelpunten en afgekeurde doelpunten voor pushmeldingen
-    const evs = [], gl = new Map(), LV = /^(1H|HT|2H|ET|BT|P|LIVE|INT)$/;
-    for (const f of arr) {
-      const id = f.fixture.id, g = [f.goals.home ?? 0, f.goals.away ?? 0], pv = this.gl.get(id), st = (f.fixture.status || {}).short || "";
-      gl.set(id, g);
-      if (!pv || !this.ready || !LV.test(st)) continue;
-      if (g[0] + g[1] > pv[0] + pv[1]) evs.push({ k: "goal", f, side: g[0] > pv[0] && g[1] === pv[1] ? 0 : g[1] > pv[1] && g[0] === pv[0] ? 1 : -1 });
-      else if (g[0] + g[1] < pv[0] + pv[1]) evs.push({ k: "no", f });
-    }
-    this.gl = gl;
-    if (evs.length) { try { await this.notify(evs); } catch (e) {} }
     const nx = new Map(), ch = [], mn = {};
     for (const f of arr) {
       const id = f.fixture.id, st = f.fixture.status || {};
