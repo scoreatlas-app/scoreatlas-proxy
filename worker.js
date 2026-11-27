@@ -109,6 +109,15 @@ export default {
       const html = `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Gebruik</title><body style="font:18px -apple-system,system-ui,sans-serif;margin:0;padding:28px;background:#f3f8f4;color:#0b2b17"><h1 style="font-size:22px;margin:0 0 6px">API-gebruik vandaag</h1><p style="margin:0 0 18px;color:#567">Abonnement: ${d.plan || "onbekend"} · bijgewerkt ${new Date(d.t || Date.now()).toLocaleTimeString("nl-NL", { timeZone: "Europe/Amsterdam", hour: "2-digit", minute: "2-digit" })}</p><div style="background:#dfe9e2;border-radius:12px;height:26px;overflow:hidden"><div style="width:${pct}%;height:100%;background:${col}"></div></div><p style="font-size:34px;font-weight:800;margin:14px 0 2px">${f(d.used)} <span style="font-size:18px;font-weight:600;color:#567">van ${f(d.limit)}</span></p><p style="margin:0 0 18px">${pct}% gebruikt · nog <b>${f(left)}</b> over</p><p style="color:#567;font-size:15px">De teller begint elke nacht om 00:00 UTC opnieuw (01:00 in de winter, 02:00 in de zomer). Boven 85% (rood): overweeg een groter abonnement.</p>`;
       return new Response(html, { headers: { "content-type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
     }
+    if (u.pathname === "/online") {
+      // Teller "nu online": telt unieke bezoekers van de laatste 90 seconden. IP wordt alleen kort als onherleidbare code in het geheugen gebruikt.
+      const H = { ...cors, "content-type": "application/json", "Cache-Control": "no-store" };
+      if (!ok || req.method !== "POST" || !env.CHAT) return new Response('{"n":0}', { headers: H });
+      try {
+        const r = await env.CHAT.get(env.CHAT.idFromName("__online")).fetch("https://chat/online?ip=" + encodeURIComponent(req.headers.get("cf-connecting-ip") || ""), { method: "POST" });
+        return new Response(r.body, { status: 200, headers: H });
+      } catch (e) { return new Response('{"n":0}', { headers: H }); }
+    }
     if (u.pathname === "/live") {
       if (!ok || req.method !== "GET") return new Response("Forbidden", { status: 403, headers: cors });
       if (!env.LIVE) return new Response("Live niet beschikbaar", { status: 501, headers: cors });
@@ -198,6 +207,7 @@ export class Chat {
   async fetch(req) {
     const u = new URL(req.url), me = (u.searchParams.get("u") || "").slice(0, 40), ip = u.searchParams.get("ip") || "";
     const J = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { "content-type": "application/json" } });
+    if (u.pathname === "/online") return this.online(ip, J);
     if (u.pathname === "/am") return this.am(req, ip, J);
     if (u.pathname === "/rput") { const b = JSON.parse(await req.text()); await this.s.storage.put("r:" + b.id, b); return J({ ok: 1 }); }
     if (u.pathname === "/rget") { const m = await this.s.storage.list({ prefix: "r:" }); return J([...m.values()]); }
@@ -362,3 +372,15 @@ export class Live {
     if (m !== this.mn) { this.mn = m; this.all("event: m\ndata: " + m + "\n\n"); }
   }
 }
+
+
+// ---- "Nu online"-teller (kamer "__online"): alleen in het geheugen, niets wordt opgeslagen ----
+Chat.prototype.online = async function (ip, J) {
+  const now = Date.now();
+  this.on = this.on || new Map(); this.slt = this.slt || (crypto.randomUUID ? crypto.randomUUID() : String(now));
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode((ip || "?") + this.slt));
+  const k = [...new Uint8Array(d)].slice(0, 8).map(b => b.toString(16).padStart(2, "0")).join("");
+  if (this.on.size < 20000 || this.on.has(k)) this.on.set(k, now);
+  for (const [x, t] of this.on) if (now - t > 90000) this.on.delete(x);
+  return J({ n: this.on.size });
+};
